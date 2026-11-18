@@ -138,13 +138,34 @@ class Server:
         if typ=='LOGIN_REQUEST':
             if p.session is not None:
                 return self.error(p, req, 'ALREADY_LOGGED_IN', 'This connection is already logged in')
-            uid=d.get('user_id'); name=d.get('name')
-            if not isinstance(uid,str) or not ID_RE.fullmatch(uid): return self.error(p,req,'INVALID_USER_ID','User ID must be 1-32 letters, digits, _ or -')
-            if not isinstance(name,str) or not 1 <= len(name.strip()) <= 40: return self.error(p,req,'INVALID_NAME','Display name must be 1-40 characters')
+            uid = d.get('user_id')
+            name = d.get('name')
+            if not isinstance(uid, str) or not ID_RE.fullmatch(uid):
+                return self.error(p, req, 'INVALID_USER_ID', 'User ID must be 1-32 letters, digits, _ or -')
+            if not isinstance(name, str) or not 1 <= len(name.strip()) <= 40:
+                return self.error(p, req, 'INVALID_NAME', 'Display name must be 1-40 characters')
+            name = name.strip()
+
+            login_error = None
             with self.lock:
-                if uid in self.players: return self.error(p,req,'DUPLICATE_USER','This user ID is already active')
-                p.user_id=uid; p.name=name.strip(); p.session=secrets.token_hex(12); self.players[uid]=p
-            p.send('LOGIN_RESPONSE',{'success':True,'session_id':p.session},req); return
+                if uid in self.players:
+                    login_error = ('DUPLICATE_USER', 'This user ID is already active')
+                else:
+                    for active_player in self.players.values():
+                        if active_player.name == name:
+                            login_error = ('DUPLICATE_NAME', 'This display name is already active')
+                            break
+                if login_error is None:
+                    p.user_id = uid
+                    p.name = name
+                    p.session = secrets.token_hex(12)
+                    self.players[uid] = p
+
+            if login_error is not None:
+                code, message = login_error
+                return self.error(p, req, code, message)
+            p.send('LOGIN_RESPONSE', {'success': True, 'session_id': p.session}, req)
+            return
         if not p.session: return self.error(p,req,'INVALID_SESSION','Login first')
         if typ=='LIST_QUIZZES_REQUEST':
             p.send('LIST_QUIZZES_RESPONSE',{'quizzes':[{'quiz_id':q['quiz_id'],'title':q['title'],'description':q['description'],'question_count':len(q['questions'])} for q in self.quizzes.values()]},req)

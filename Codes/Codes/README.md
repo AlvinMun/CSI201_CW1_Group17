@@ -74,6 +74,7 @@ The tests cover question-bank validation, TCP framing, room cleanup, host transf
 Each TCP application message is a four-byte unsigned big-endian payload length followed by a UTF-8 JSON object. Maximum payload: 65,536 bytes. Messages use `version`, `type`, `request_id`, `session_id`, and `payload`. Server events use `event_id`. The implementation uses message names documented in the Development Documentation.
 
 ## Assumptions and limitations to verify
+- Active players must use unique user IDs and display names. Display names are compared case-sensitively after trimming spaces at both ends. A display name becomes available again after its player disconnects.
 - If the host disconnects or leaves, the first remaining player becomes the host. The server removes the room when the last player leaves.
 - The lobby has a maximum of 20 players; a room requires at least two players.
 - The server uses one handler thread per connection and one quiz worker thread per active room.

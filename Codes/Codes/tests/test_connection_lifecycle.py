@@ -19,10 +19,11 @@ class ConnectionLifecycleTests(unittest.TestCase):
         self.server.dispatch(self.host, 'CREATE_ROOM_REQUEST', {'quiz_id': 'demo'}, None)
         self.room = self.server.rooms[self.host.room]
 
-    def login(self, user_id):
+    def login(self, user_id, name=None):
         player = Player(Mock(spec=socket.socket), None)
         player.send = Mock()
-        self.server.dispatch(player, 'LOGIN_REQUEST', {'user_id': user_id, 'name': user_id}, None)
+        self.server.dispatch(player, 'LOGIN_REQUEST',
+                             {'user_id': user_id, 'name': user_id if name is None else name}, None)
         return player
 
     def test_last_player_logout_removes_lobby(self):
@@ -50,6 +51,19 @@ class ConnectionLifecycleTests(unittest.TestCase):
         self.assertNotIn('new', self.server.players)
         self.server.drop(self.host)
         self.assertIs(self.login('host'), self.server.players['host'])
+
+    def test_different_user_id_cannot_use_an_active_display_name(self):
+        guest = self.login('guest', '  host  ')
+        response_type, payload, _ = guest.send.call_args.args
+        self.assertEqual((response_type, payload['code']), ('ERROR_RESPONSE', 'DUPLICATE_NAME'))
+        self.assertIsNone(guest.session)
+        self.assertEqual(self.server.players, {'host': self.host})
+
+    def test_display_name_can_be_reused_after_logout(self):
+        self.server.dispatch(self.host, 'LOGOUT_REQUEST', {}, None)
+        guest = self.login('guest', 'host')
+        self.assertIs(self.server.players['guest'], guest)
+        self.assertEqual(guest.name, 'host')
 
 
 class ClientDisconnectTests(unittest.TestCase):
