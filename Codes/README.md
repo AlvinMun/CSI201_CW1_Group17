@@ -7,22 +7,40 @@
 - Standard Library only
 - Raw TCP sockets; no GUI, database, web framework or package installation
 
-## Start the server
-From the `Codes` directory:
+## Run in the examiner Docker environment
 
-```bash
-python3 server.py --host 0.0.0.0 --port 5000 --questions questions.json
+Use the `CSI201_CW1_Docker_Env` package from Learning Mall for verification and demonstrations. Its Compose file builds the Python 3.12 image tagged `csi201-cw1:latest`.
+
+### Build the course image
+
+Start Docker Desktop. In File Explorer, open the extracted `CSI201_CW1_Docker_Env` folder that contains `compose.yaml`. Type `powershell` in the address bar and press Enter to open PowerShell in that folder. Run:
+
+```powershell
+docker compose build python
 ```
 
-The server prints `SERVER_READY` only after validating the complete question bank and successfully binding/listening.
+### Start the server
 
-## Start clients
-In separate terminals:
+After the build completes, open the project's `Codes` folder in File Explorer. Make sure `compose.yaml`, `server.py` and `questions.json` are in this folder. Type `powershell` in the address bar and press Enter, then run:
 
-```bash
-python3 client.py --server 127.0.0.1 --port 5000 --id player1 --name Alice
-python3 client.py --server 127.0.0.1 --port 5000 --id player2 --name Bob
+```powershell
+docker compose run --rm --name csi201-quiz python server.py --host 0.0.0.0 --port 5000 --questions questions.json
 ```
+
+Wait for `SERVER_READY` and keep the server terminal open. The server prints this line after validating the question bank and opening its listening socket.
+
+Include `Codes/compose.yaml` in the submission ZIP so the command can be reproduced. It mounts `Codes` at `/code` and uses the official image built in the previous step. Omit the Dockerfile and Docker image from the ZIP as required by the coursework.
+
+### Start the clients
+
+Open two more terminals and run one command in each. Both client processes run in the server container and connect to its port 5000 over TCP. Only the server reads `questions.json`.
+
+```powershell
+docker exec -it csi201-quiz python client.py --server 127.0.0.1 --port 5000 --id player1 --name Alice
+docker exec -it csi201-quiz python client.py --server 127.0.0.1 --port 5000 --id player2 --name Bob
+```
+
+If you choose a different port, use it in the server and both client commands. Use `/quit` to exit each client and Ctrl+C in the server terminal to stop the server.
 
 ## CLI commands
 | Command | Purpose |
@@ -42,23 +60,12 @@ python3 client.py --server 127.0.0.1 --port 5000 --id player2 --name Bob
 
 A room requires at least two players and all players must be ready. The host must also use `/ready`.
 
-## Docker environment
-The supplied environment ZIP contains a Python 3.12 Dockerfile and Compose file. From the extracted environment directory, copy/mount the `Codes` contents into `/code` or build the supplied Compose service with the code directory mounted there. The module's examiner image/tag on Learning Mall takes precedence over this development environment.
-
-Example using the supplied Compose setup (run from the directory containing `compose.yaml`):
-
-```bash
-docker compose run --rm python --version
-docker compose run --rm -it -v "$(pwd)/../Codes:/code" -w /code python server.py --host 0.0.0.0 --port 5000 --questions questions.json
-```
-
-Use a second terminal/container for each client. Confirm the exact networking invocation with your team and the examiner image configuration.
-
 ## Tests
-From `Codes`:
 
-```bash
-python3 -m unittest discover -s tests -v
+With the examiner container running, run the unit tests from another terminal.
+
+```powershell
+docker exec csi201-quiz python3 -m unittest discover -s tests -v
 ```
 
 These unit tests cover question-bank acceptance, selected invalid inputs, fragmented TCP frames, coalesced frames and zero-length frame rejection. They do **not** establish full paired-workflow, ten-client, two-room, timing, malformed-frame or examiner-Docker compliance. Those tests must be run and recorded by the team in the official environment.
