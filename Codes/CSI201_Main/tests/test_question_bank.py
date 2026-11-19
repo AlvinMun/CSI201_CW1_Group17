@@ -8,7 +8,12 @@ class QuestionBankTests(unittest.TestCase):
         self.sample = Path(__file__).parents[1] / 'questions.json'
     def test_valid_bank_loads(self):
         quizzes = load_questions(self.sample)
-        self.assertEqual(len(quizzes), 2)
+        expected_quizzes = json.loads(self.sample.read_text(encoding='utf-8'))['quizzes']
+        self.assertGreaterEqual(len(quizzes), 2)
+        self.assertEqual(
+            [quiz['quiz_id'] for quiz in quizzes],
+            [quiz['quiz_id'] for quiz in expected_quizzes],
+        )
         self.assertTrue(all(len(q['questions']) >= 5 for q in quizzes))
     def test_wrong_schema_version_rejected(self):
         data=json.loads(self.sample.read_text(encoding='utf-8')); data['schema_version']=2

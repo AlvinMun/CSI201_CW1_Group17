@@ -88,27 +88,43 @@ class Server:
             except OSError: self.drop(p)
     def error(self,p,req,code,message):
         p.send('ERROR_RESPONSE',{'code':code,'message':message},req)
+
+    def remove_from_room(self, player, room):
+        with room.lock:
+            if room.players.get(player.user_id) is not player:
+                return None
+            del room.players[player.user_id]
+            room.ready.pop(player.user_id, None)
+            room.scores.pop(player.user_id, None)
+            player.room = None
+            if room.players:
+                if room.host is player:
+                    room.host = next(iter(room.players.values()))
+                return room.snapshot()
+            room.state = 'CLOSED'
+        with self.lock:
+            self.rooms.pop(room.code, None)
+        return None
+
     def drop(self,p):
         with self.lock:
             if not p.alive: return
-            p.alive=False
-            if p.user_id in self.players and self.players[p.user_id] is p: del self.players[p.user_id]
-            room=self.rooms.get(p.room) if p.room else None
-        if room:
-            with room.lock:
-                room.players.pop(p.user_id,None); room.ready.pop(p.user_id,None)
-                if room.state=='LOBBY' and room.players:
-                    if room.host is p: room.host=next(iter(room.players.values()))
-                elif room.state in ('PLAYING','FINISHED') and not room.players:
-                    room.state='CLOSED'
-            if room.players: self.broadcast(room,'PLAYER_STATUS_EVENT',room.snapshot())
-            elif room.state=='CLOSED':
-                with self.lock: self.rooms.pop(room.code,None)
-        try: p.sock.close()
-        except OSError: pass
+            p.alive = False
+            room = self.rooms.get(p.room)
+        snapshot = self.remove_from_room(p, room) if room else None
+        with self.lock:
+            if self.players.get(p.user_id) is p:
+                del self.players[p.user_id]
+        try:
+            p.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        p.sock.close()
+        if snapshot is not None:
+            self.broadcast(room, 'PLAYER_STATUS_EVENT', snapshot)
     def handle(self,p):
         try:
-            while not self.stopping.is_set():
+            while p.alive and not self.stopping.is_set():
                 msg=recv_message(p.sock)
                 if msg is None: break
                 if msg.get('version') != 1 or not isinstance(msg.get('type'),str) or not isinstance(msg.get('payload'),dict):
@@ -120,6 +136,8 @@ class Server:
         finally: self.drop(p)
     def dispatch(self,p,typ,d,req):
         if typ=='LOGIN_REQUEST':
+            if p.session is not None:
+                return self.error(p, req, 'ALREADY_LOGGED_IN', 'This connection is already logged in')
             uid=d.get('user_id'); name=d.get('name')
             if not isinstance(uid,str) or not ID_RE.fullmatch(uid): return self.error(p,req,'INVALID_USER_ID','User ID must be 1-32 letters, digits, _ or -')
             if not isinstance(name,str) or not 1 <= len(name.strip()) <= 40: return self.error(p,req,'INVALID_NAME','Display name must be 1-40 characters')
@@ -191,15 +209,10 @@ class Server:
         elif typ=='LEAVE_ROOM_REQUEST':
             r=self.get_room(p,req)
             if r:
-                with r.lock:
-                    r.players.pop(p.user_id,None); r.ready.pop(p.user_id,None); r.scores.pop(p.user_id,None); p.room=None
-                    if r.host is p and r.players: r.host=next(iter(r.players.values()))
-                    if not r.players: r.state='CLOSED'
-                    snap=r.snapshot()
+                snapshot = self.remove_from_room(p, r)
                 p.send('LEAVE_ROOM_RESPONSE',{'success':True},req)
-                if r.players: self.broadcast(r,'PLAYER_STATUS_EVENT',snap)
-                else:
-                    with self.lock: self.rooms.pop(r.code,None)
+                if snapshot is not None:
+                    self.broadcast(r, 'PLAYER_STATUS_EVENT', snapshot)
         elif typ=='LOGOUT_REQUEST':
             p.send('LOGOUT_RESPONSE',{'success':True},req); self.drop(p)
         else: self.error(p,req,'UNKNOWN_COMMAND',f'Unsupported message type: {typ}')
