@@ -48,8 +48,14 @@ def load_questions(path):
         qid, title, desc, questions = quiz.get('quiz_id'), quiz.get('title'), quiz.get('description'), quiz.get('questions')
         if not isinstance(qid, str) or not ID_RE.fullmatch(qid) or qid in quizids: raise ValueError(f'quiz {qi}: invalid or duplicate quiz_id')
         quizids.add(qid)
-        if not isinstance(title, str) or not 1 <= len(title.strip()) <= 100: raise ValueError(f'{qid}: title must be 1-100 visible characters')
-        if not isinstance(desc, str) or len(desc) > 300: raise ValueError(f'{qid}: description must be 0-300 characters')
+        if (
+            not isinstance(title, str)
+            or not title.isprintable()
+            or not 1 <= len(title.strip()) <= 100
+        ):
+            raise ValueError(f'{qid}: title must contain 1-100 visible characters')
+        if not isinstance(desc, str) or not desc.isprintable() or len(desc) > 300:
+            raise ValueError(f'{qid}: description must contain 0-300 visible characters')
         if not isinstance(questions, list) or not 5 <= len(questions) <= 50: raise ValueError(f'{qid}: questions must contain 5-50 entries')
         for j, q in enumerate(questions):
             where=f'{qid} question {j}'
@@ -57,7 +63,12 @@ def load_questions(path):
             ident=q.get('question_id'); text=q.get('text'); opts=q.get('options'); ans=q.get('answer'); tl=q.get('time_limit'); pts=q.get('points')
             if not isinstance(ident,str) or not ID_RE.fullmatch(ident) or ident in qids: raise ValueError(f'{where}: invalid or duplicate question_id')
             qids.add(ident)
-            if not isinstance(text,str) or not 1 <= len(text.strip()) <= 500: raise ValueError(f'{where}: text must be 1-500 characters')
+            if (
+                not isinstance(text, str)
+                or not text.isprintable()
+                or not 1 <= len(text.strip()) <= 500
+            ):
+                raise ValueError(f'{where}: text must contain 1-500 visible characters')
             if not isinstance(opts,dict) or set(opts) != {'A','B','C','D'}: raise ValueError(f'{where}: options must have exactly A, B, C, D')
             if any(not isinstance(v,str) or not 1 <= len(v) <= 200 for v in opts.values()): raise ValueError(f'{where}: each option must be 1-200 characters')
             if ans not in ('A','B','C','D'): raise ValueError(f'{where}: answer must be A, B, C or D')
