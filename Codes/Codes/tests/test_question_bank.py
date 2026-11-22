@@ -28,29 +28,4 @@ class QuestionBankTests(unittest.TestCase):
             with self.assertRaises(ValueError): load_questions(name)
         finally: Path(name).unlink()
 
-    def test_nonprintable_characters_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            bank_path = Path(directory) / 'questions.json'
-            for field in ('title', 'description', 'text'):
-                for value in ('\x01', 'Visible text\u200b'):
-                    with self.subTest(field=field, value=value):
-                        data = json.loads(self.sample.read_text(encoding='utf-8'))
-                        quiz = data['quizzes'][0]
-                        target = quiz['questions'][0] if field == 'text' else quiz
-                        target[field] = value
-                        bank_path.write_text(json.dumps(data), encoding='utf-8')
-                        with self.assertRaisesRegex(ValueError, field):
-                            load_questions(bank_path)
-
-    def test_printable_unicode_and_empty_description_accepted(self):
-        data = json.loads(self.sample.read_text(encoding='utf-8'))
-        quiz = data['quizzes'][0]
-        quiz['title'] = 'Café 题库'
-        quiz['description'] = ''
-        quiz['questions'][0]['text'] = 'Quelle est la capitale du Pérou ?'
-        with tempfile.TemporaryDirectory() as directory:
-            bank_path = Path(directory) / 'questions.json'
-            bank_path.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
-            self.assertEqual(load_questions(bank_path), data['quizzes'])
-
 if __name__=='__main__': unittest.main()

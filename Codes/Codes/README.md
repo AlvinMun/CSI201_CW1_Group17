@@ -68,14 +68,13 @@ With the examiner container running, run the unit tests from another terminal.
 docker exec csi201-quiz python3 -m unittest discover -s tests -v
 ```
 
-The tests cover question-bank validation, TCP framing, room cleanup, host transfer, repeated login on one connection and client exit after a server disconnect. The team must also run and record the full paired workflow, concurrent rooms, timing and failure handling in the official environment.
+These unit tests cover question-bank acceptance, selected invalid inputs, fragmented TCP frames, coalesced frames and zero-length frame rejection. They do **not** establish full paired-workflow, ten-client, two-room, timing, malformed-frame or examiner-Docker compliance. Those tests must be run and recorded by the team in the official environment.
 
 ## Protocol summary
 Each TCP application message is a four-byte unsigned big-endian payload length followed by a UTF-8 JSON object. Maximum payload: 65,536 bytes. Messages use `version`, `type`, `request_id`, `session_id`, and `payload`. Server events use `event_id`. The implementation uses message names documented in the Development Documentation.
 
 ## Assumptions and limitations to verify
-- Active players must use unique user IDs and display names. Display names are compared case-sensitively after trimming spaces at both ends. A display name becomes available again after its player disconnects.
-- If the host disconnects or leaves, the first remaining player becomes the host. The server removes the room when the last player leaves.
+- The host is transferred to the first remaining player if the host disconnects or leaves during the lobby.
 - The lobby has a maximum of 20 players; a room requires at least two players.
 - The server uses one handler thread per connection and one quiz worker thread per active room.
 - Scores award the configured points for a correct answer and zero otherwise; no speed bonus is used.

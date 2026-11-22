@@ -21,12 +21,14 @@ def receive(sock):
     if not isinstance(obj,dict): raise ValueError('invalid message object')
     return obj
 def send(sock,lock,typ,payload=None):
-    msg={'version':1,'type':typ,'request_id':secrets.token_hex(6),'session_id':None,'payload':payload or {}}
+    msg={'version':1,'type':typ,'request_id':secrets.token_hex(6),'session_id': getattr(main, 'session_id', None),'payload':payload or {}}
     raw=json.dumps(msg,ensure_ascii=False,separators=(',',':')).encode('utf-8')
     with lock: sock.sendall(struct.pack('!I',len(raw))+raw)
 
 def display(msg):
     typ=msg.get('type'); p=msg.get('payload',{})
+    if typ == 'LOGIN_RESPONSE':
+        main.session_id = msg.get('session_id') or p.get('session_id')
     if typ == 'QUESTION_EVENT': main.current_question = p.get('question_id')
     if typ=='ERROR_RESPONSE': print(f"[ERROR {p.get('code')}] {p.get('message')}")
     elif typ=='LIST_QUIZZES_RESPONSE':
@@ -52,7 +54,24 @@ def display(msg):
         for uid,pts in p.get('points_awarded',{}).items(): print(f"  {uid}: {pts} points")
         print_leaderboard(p.get('leaderboard',[]))
     elif typ in ('LEADERBOARD_RESPONSE',): print_leaderboard(p.get('leaderboard',[]))
-    elif typ=='QUIZ_FINISHED_EVENT': print('\n=== QUIZ FINISHED ==='); print_leaderboard(p.get('final_leaderboard',[])); print('Winner:',p.get('winner'))
+    elif typ == 'QUIZ_FINISHED_EVENT':
+        print('\n=== QUIZ FINISHED ===')
+
+        board = p.get('final_leaderboard', [])
+        winners = p.get('winners', [])
+
+        print_leaderboard(board)
+
+        winner_names = [
+            player.get('name', player.get('user_id'))
+            for player in board
+            if player.get('user_id') in winners
+        ]
+
+        if winner_names:
+            print('\nWinner(s): ' + ', '.join(winner_names))
+        else:
+            print('\nNo winner.')
     elif typ=='LEAVE_ROOM_RESPONSE': print('You left the room.')
     elif typ=='LOGOUT_RESPONSE': print('Logged out.')
     elif typ not in ('LOGIN_RESPONSE',): print(f'[{typ}] {json.dumps(p,ensure_ascii=False)}')
@@ -72,14 +91,20 @@ def main():
     commands = queue.Queue(maxsize=1)
 
     def read_commands():
-        # An idle input thread must not hold Python's buffered stdin lock at exit.
         with open(sys.stdin.fileno(), 'rb', buffering=0, closefd=False) as terminal:
             while not stop.is_set():
                 raw = terminal.readline()
                 if not raw:
-                    commands.put('/quit')
+                    commands.put(('/quit', None))
                     return
-                commands.put(raw.decode(sys.stdin.encoding or 'utf-8', errors='replace').strip())
+                line = raw.decode(
+                    sys.stdin.encoding or 'utf-8',
+                    errors='replace'
+                ).strip()
+
+                question_id = getattr(main, 'current_question', None)
+
+                commands.put((line, question_id))
 
     def reader():
         try:
@@ -102,7 +127,7 @@ def main():
             print('quiz> ', end='', flush=True)
             while not stop.is_set():
                 try:
-                    line = commands.get(timeout=0.1)
+                    line, entered_question_id = commands.get(timeout=0.1)
                     break
                 except queue.Empty:
                     continue
@@ -120,7 +145,19 @@ def main():
                 elif cmd=='/players': send(sock,lock,'PLAYER_LIST_REQUEST')
                 elif cmd=='/ready': send(sock,lock,'READY_REQUEST',{'ready':True})
                 elif cmd=='/start': send(sock,lock,'START_QUIZ_REQUEST')
-                elif cmd=='/answer' and len(parts)==2: send(sock,lock,'ANSWER_REQUEST',{'question_id':getattr(main,'current_question',None),'answer':parts[1].upper()})
+                elif cmd == '/answer' and len(parts) == 2:
+                    if entered_question_id is None:
+                        print('No active question.')
+                    else:
+                        send(
+                            sock,
+                            lock,
+                            'ANSWER_REQUEST',
+                            {
+                                'question_id': entered_question_id,
+                                'answer': parts[1].upper()
+                            }
+                        )
                 elif cmd=='/score': send(sock,lock,'LEADERBOARD_REQUEST')
                 elif cmd=='/leave': send(sock,lock,'LEAVE_ROOM_REQUEST')
                 elif cmd=='/quit': send(sock,lock,'LOGOUT_REQUEST'); break
