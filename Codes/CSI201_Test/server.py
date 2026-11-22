@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""CSI201 Networked Quiz Tournament server (Python 3.12 standard library only)."""
+#/usr/bin/env python3
 import argparse, json, socket, struct, threading, time, secrets, re, sys
 from pathlib import Path
 
@@ -133,7 +132,6 @@ class Server:
                 data = msg['payload']
                 req = msg.get('request_id')
 
-                # Validate session ID for authenticated requests.
                 if typ != 'LOGIN_REQUEST':
                     if not p.session or msg.get('session_id') != p.session:
                         self.error(
@@ -265,8 +263,24 @@ class Server:
                 self.broadcast(r,'QUESTION_RESULT_EVENT',result)
                 time.sleep(1)
             with r.lock:
-                r.state='FINISHED'; board=self.leaderboard(r); winner=board[0]['user_id'] if board else None
-            self.broadcast(r,'QUIZ_FINISHED_EVENT',{'quiz_id':r.quiz['quiz_id'],'final_leaderboard':board,'winner':winner})
+                r.state = 'FINISHED'
+                board = self.leaderboard(r)
+
+                if board:
+                    highest_score = board[0]['score']
+                    winners = [
+                        player['user_id']
+                        for player in board
+                        if player['score'] == highest_score
+                    ]
+                else:
+                    winners = []
+
+            self.broadcast(r, 'QUIZ_FINISHED_EVENT', {
+                'quiz_id': r.quiz['quiz_id'],
+                'final_leaderboard': board,
+                'winners': winners
+            })
         except Exception as e:
             print(f'Room {r.code} error: {e}',file=sys.stderr)
             with r.lock: r.state='FINISHED'

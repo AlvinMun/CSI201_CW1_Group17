@@ -54,7 +54,24 @@ def display(msg):
         for uid,pts in p.get('points_awarded',{}).items(): print(f"  {uid}: {pts} points")
         print_leaderboard(p.get('leaderboard',[]))
     elif typ in ('LEADERBOARD_RESPONSE',): print_leaderboard(p.get('leaderboard',[]))
-    elif typ=='QUIZ_FINISHED_EVENT': print('\n=== QUIZ FINISHED ==='); print_leaderboard(p.get('final_leaderboard',[])); print('Winner:',p.get('winner'))
+    elif typ == 'QUIZ_FINISHED_EVENT':
+        print('\n=== QUIZ FINISHED ===')
+
+        board = p.get('final_leaderboard', [])
+        winners = p.get('winners', [])
+
+        print_leaderboard(board)
+
+        winner_names = [
+            player.get('name', player.get('user_id'))
+            for player in board
+            if player.get('user_id') in winners
+        ]
+
+        if winner_names:
+            print('\nWinner(s): ' + ', '.join(winner_names))
+        else:
+            print('\nNo winner.')
     elif typ=='LEAVE_ROOM_RESPONSE': print('You left the room.')
     elif typ=='LOGOUT_RESPONSE': print('Logged out.')
     elif typ not in ('LOGIN_RESPONSE',): print(f'[{typ}] {json.dumps(p,ensure_ascii=False)}')
@@ -74,7 +91,6 @@ def main():
     commands = queue.Queue(maxsize=1)
 
     def read_commands():
-        # An idle input thread must not hold Python's buffered stdin lock at exit.
         with open(sys.stdin.fileno(), 'rb', buffering=0, closefd=False) as terminal:
             while not stop.is_set():
                 raw = terminal.readline()
