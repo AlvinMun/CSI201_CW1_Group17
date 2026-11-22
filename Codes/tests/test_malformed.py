@@ -39,7 +39,6 @@ def request(sock, typ, session_id, payload):
 with socket.create_connection((HOST, PORT), timeout=5) as sock:
     sock.settimeout(5)
 
-    # 1. Login
     login = request(sock, "LOGIN_REQUEST", None, {
         "user_id": "malformed_test",
         "name": "Malformed Tester"
@@ -47,7 +46,6 @@ with socket.create_connection((HOST, PORT), timeout=5) as sock:
     print("Login:", login)
 
     session_id = login["session_id"]
-    # Test an incorrect session token after login
     response = request(
         sock,
         "LIST_QUIZZES_REQUEST",
@@ -56,8 +54,6 @@ with socket.create_connection((HOST, PORT), timeout=5) as sock:
     )
 
     print("Invalid session response:", response)
-
-    # 2. Retrieve available quizzes
     quizzes_response = request(
         sock, "LIST_QUIZZES_REQUEST", session_id, {}
     )
@@ -67,8 +63,6 @@ with socket.create_connection((HOST, PORT), timeout=5) as sock:
 
     print("Selected quiz:", quiz_id)
 
-    # 3. Create a room
-    # 3. Send CREATE_ROOM_REQUEST without quiz_id
     room_response = request(
         sock, "CREATE_ROOM_REQUEST", session_id,
         {}
@@ -76,7 +70,6 @@ with socket.create_connection((HOST, PORT), timeout=5) as sock:
 
     print("Missing field response:", room_response)
 
-    # 4. Send an invalid READY_REQUEST
     malformed_response = request(
         sock, "READY_REQUEST", session_id,
         {"ready": "yes"}

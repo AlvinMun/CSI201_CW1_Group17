@@ -35,7 +35,6 @@ def test_invalid_envelope():
     with socket.create_connection((HOST, PORT), timeout=5) as sock:
         sock.settimeout(5)
 
-        # Valid JSON, but missing required envelope fields.
         message = {
             "version": 1,
             "type": "LIST_QUIZZES_REQUEST"
@@ -53,7 +52,6 @@ def test_invalid_json():
     with socket.create_connection((HOST, PORT), timeout=5) as sock:
         sock.settimeout(5)
 
-        # Deliberately malformed JSON.
         raw = b'{"version": 1, "type": INVALID_JSON}'
         send_raw(sock, raw)
 
