@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """CSI201 command-line quiz client."""
-import argparse, json, socket, struct, threading, secrets, sys
+import argparse, json, queue, socket, struct, threading, secrets, sys
 MAX_FRAME=65536
 
 def recv_exact(sock,n):
@@ -21,12 +21,14 @@ def receive(sock):
     if not isinstance(obj,dict): raise ValueError('invalid message object')
     return obj
 def send(sock,lock,typ,payload=None):
-    msg={'version':1,'type':typ,'request_id':secrets.token_hex(6),'session_id':None,'payload':payload or {}}
+    msg={'version':1,'type':typ,'request_id':secrets.token_hex(6),'session_id': getattr(main, 'session_id', None),'payload':payload or {}}
     raw=json.dumps(msg,ensure_ascii=False,separators=(',',':')).encode('utf-8')
     with lock: sock.sendall(struct.pack('!I',len(raw))+raw)
 
 def display(msg):
     typ=msg.get('type'); p=msg.get('payload',{})
+    if typ == 'LOGIN_RESPONSE':
+        main.session_id = msg.get('session_id') or p.get('session_id')
     if typ == 'QUESTION_EVENT': main.current_question = p.get('question_id')
     if typ=='ERROR_RESPONSE': print(f"[ERROR {p.get('code')}] {p.get('message')}")
     elif typ=='LIST_QUIZZES_RESPONSE':
@@ -52,7 +54,24 @@ def display(msg):
         for uid,pts in p.get('points_awarded',{}).items(): print(f"  {uid}: {pts} points")
         print_leaderboard(p.get('leaderboard',[]))
     elif typ in ('LEADERBOARD_RESPONSE',): print_leaderboard(p.get('leaderboard',[]))
-    elif typ=='QUIZ_FINISHED_EVENT': print('\n=== QUIZ FINISHED ==='); print_leaderboard(p.get('final_leaderboard',[])); print('Winner:',p.get('winner'))
+    elif typ == 'QUIZ_FINISHED_EVENT':
+        print('\n=== QUIZ FINISHED ===')
+
+        board = p.get('final_leaderboard', [])
+        winners = p.get('winners', [])
+
+        print_leaderboard(board)
+
+        winner_names = [
+            player.get('name', player.get('user_id'))
+            for player in board
+            if player.get('user_id') in winners
+        ]
+
+        if winner_names:
+            print('\nWinner(s): ' + ', '.join(winner_names))
+        else:
+            print('\nNo winner.')
     elif typ=='LEAVE_ROOM_RESPONSE': print('You left the room.')
     elif typ=='LOGOUT_RESPONSE': print('Logged out.')
     elif typ not in ('LOGIN_RESPONSE',): print(f'[{typ}] {json.dumps(p,ensure_ascii=False)}')
@@ -63,23 +82,83 @@ def print_leaderboard(rows):
 def main():
     ap=argparse.ArgumentParser(description='CSI201 networked quiz tournament client')
     ap.add_argument('--server',required=True); ap.add_argument('--port',required=True,type=int); ap.add_argument('--id',required=True); ap.add_argument('--name',required=True)
-    a=ap.parse_args(); main.current_question = None; sock=socket.create_connection((a.server,a.port),timeout=10); sock.settimeout(None); lock=threading.Lock(); pending={}; pending_lock=threading.Lock(); stop=threading.Event()
+    a = ap.parse_args()
+    main.current_question = None
+    main.session_id = None
+    lock = threading.Lock()
+    with socket.create_connection((a.server, a.port), timeout=10) as sock:
+        try:
+            send(sock, lock, 'LOGIN_REQUEST', {'user_id': a.id, 'name': a.name})
+            reply = receive(sock)
+        except (OSError, ValueError) as e:
+            print(f'Login failed: {e}', file=sys.stderr)
+            return
+        except KeyboardInterrupt:
+            return
+
+        if reply is None:
+            print('Disconnected from server.', flush=True)
+            return
+        display(reply)
+        if main.session_id is None:
+            return
+
+        sock.settimeout(None)
+        run_session(sock, lock)
+
+
+def run_session(sock, lock):
+    stop = threading.Event()
+    commands = queue.Queue(maxsize=1)
+
+    def read_commands():
+        with open(sys.stdin.fileno(), 'rb', buffering=0, closefd=False) as terminal:
+            while not stop.is_set():
+                raw = terminal.readline()
+                if not raw:
+                    commands.put(('/quit', None))
+                    return
+                line = raw.decode(
+                    sys.stdin.encoding or 'utf-8',
+                    errors='replace'
+                ).strip()
+
+                question_id = getattr(main, 'current_question', None)
+
+                commands.put((line, question_id))
+
     def reader():
         try:
             while not stop.is_set():
                 msg=receive(sock)
                 if msg is None: break
                 display(msg)
-        except (OSError,ValueError,json.JSONDecodeError) as e: print(f'Connection reader stopped: {e}',file=sys.stderr)
-        finally: stop.set(); print('Disconnected from server.')
-    t=threading.Thread(target=reader,daemon=True); t.start()
-    send(sock,lock,'LOGIN_REQUEST',{'user_id':a.id,'name':a.name})
+                if msg.get('type') == 'LOGOUT_RESPONSE':
+                    break
+        except (OSError, ValueError) as e:
+            if not stop.is_set():
+                print(f'Connection reader stopped: {e}', file=sys.stderr)
+        finally:
+            stop.set()
+            print('Disconnected from server.', flush=True)
+
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    reader_thread.start()
     print('\nCommands: /help /quizzes /rooms /create <quiz_id> /join <room_code> /players /ready /start /answer <A|B|C|D> /score /leave /quit')
+    threading.Thread(target=read_commands, daemon=True).start()
     try:
         while not stop.is_set():
-            try: line=input('quiz> ').strip()
-            except EOFError: line='/quit'
-            if not line: continue
+            print('quiz> ', end='', flush=True)
+            while not stop.is_set():
+                try:
+                    line, entered_question_id = commands.get(timeout=0.1)
+                    break
+                except queue.Empty:
+                    continue
+            if stop.is_set():
+                break
+            if not line:
+                continue
             parts=line.split(); cmd=parts[0].lower()
             try:
                 if cmd=='/help': print('Use /quizzes, /rooms, /create ID, /join CODE, /players, /ready, /start, /answer A, /score, /leave, /quit.')
@@ -90,10 +169,25 @@ def main():
                 elif cmd=='/players': send(sock,lock,'PLAYER_LIST_REQUEST')
                 elif cmd=='/ready': send(sock,lock,'READY_REQUEST',{'ready':True})
                 elif cmd=='/start': send(sock,lock,'START_QUIZ_REQUEST')
-                elif cmd=='/answer' and len(parts)==2: send(sock,lock,'ANSWER_REQUEST',{'question_id':getattr(main,'current_question',None),'answer':parts[1].upper()})
+                elif cmd == '/answer' and len(parts) == 2:
+                    if entered_question_id is None:
+                        print('No active question.')
+                    else:
+                        send(
+                            sock,
+                            lock,
+                            'ANSWER_REQUEST',
+                            {
+                                'question_id': entered_question_id,
+                                'answer': parts[1].upper()
+                            }
+                        )
                 elif cmd=='/score': send(sock,lock,'LEADERBOARD_REQUEST')
                 elif cmd=='/leave': send(sock,lock,'LEAVE_ROOM_REQUEST')
-                elif cmd=='/quit': send(sock,lock,'LOGOUT_REQUEST'); break
+                elif cmd=='/quit':
+                    send(sock, lock, 'LOGOUT_REQUEST')
+                    stop.wait(timeout=5)
+                    break
                 else: print('Invalid command. Type /help.')
             except OSError as e: print(f'Unable to send: {e}'); break
     except KeyboardInterrupt: pass
@@ -101,5 +195,5 @@ def main():
         stop.set()
         try: sock.shutdown(socket.SHUT_RDWR)
         except OSError: pass
-        sock.close()
+        reader_thread.join()
 if __name__=='__main__': main()

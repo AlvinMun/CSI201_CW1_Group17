@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""CSI201 Networked Quiz Tournament server (Python 3.12 standard library only)."""
+#/usr/bin/env python3
 import argparse, json, socket, struct, threading, time, secrets, re, sys
 from pathlib import Path
 
@@ -48,8 +47,10 @@ def load_questions(path):
         qid, title, desc, questions = quiz.get('quiz_id'), quiz.get('title'), quiz.get('description'), quiz.get('questions')
         if not isinstance(qid, str) or not ID_RE.fullmatch(qid) or qid in quizids: raise ValueError(f'quiz {qi}: invalid or duplicate quiz_id')
         quizids.add(qid)
-        if not isinstance(title, str) or not 1 <= len(title.strip()) <= 100: raise ValueError(f'{qid}: title must be 1-100 visible characters')
-        if not isinstance(desc, str) or len(desc) > 300: raise ValueError(f'{qid}: description must be 0-300 characters')
+        if not isinstance(title, str) or not title.strip() or len(title) > 100 or not title.isprintable():
+            raise ValueError(f'{qid}: title must be 1-100 visible characters')
+        if not isinstance(desc, str) or len(desc) > 300 or (desc and not desc.isprintable()):
+            raise ValueError(f'{qid}: description must be 0-300 visible characters')
         if not isinstance(questions, list) or not 5 <= len(questions) <= 50: raise ValueError(f'{qid}: questions must contain 5-50 entries')
         for j, q in enumerate(questions):
             where=f'{qid} question {j}'
@@ -57,7 +58,8 @@ def load_questions(path):
             ident=q.get('question_id'); text=q.get('text'); opts=q.get('options'); ans=q.get('answer'); tl=q.get('time_limit'); pts=q.get('points')
             if not isinstance(ident,str) or not ID_RE.fullmatch(ident) or ident in qids: raise ValueError(f'{where}: invalid or duplicate question_id')
             qids.add(ident)
-            if not isinstance(text,str) or not 1 <= len(text.strip()) <= 500: raise ValueError(f'{where}: text must be 1-500 characters')
+            if not isinstance(text, str) or not text.strip() or len(text) > 500 or not text.isprintable():
+                raise ValueError(f'{where}: text must be 1-500 visible characters')
             if not isinstance(opts,dict) or set(opts) != {'A','B','C','D'}: raise ValueError(f'{where}: options must have exactly A, B, C, D')
             if any(not isinstance(v,str) or not 1 <= len(v) <= 200 for v in opts.values()): raise ValueError(f'{where}: each option must be 1-200 characters')
             if ans not in ('A','B','C','D'): raise ValueError(f'{where}: answer must be A, B, C or D')
@@ -76,7 +78,17 @@ class Room:
     def __init__(self, code, quiz, host):
         self.code=code; self.quiz=quiz; self.host=host; self.players={host.user_id:host}; self.ready={host.user_id:False}; self.state='LOBBY'; self.lock=threading.RLock(); self.current_q=None; self.answers={}; self.scores={host.user_id:0}; self.thread=None
     def snapshot(self):
-        return {'room_code':self.code,'quiz_id':self.quiz['quiz_id'],'state':self.state,'host':self.host.user_id,'players':[{'user_id':p.user_id,'name':p.name,'ready':self.ready.get(p.user_id,False)} for p in self.players.values()]}
+        with self.lock:
+            return {
+                'room_code': self.code,
+                'quiz_id': self.quiz['quiz_id'],
+                'state': self.state,
+                'host': self.host.user_id,
+                'players': [
+                    {'user_id': p.user_id, 'name': p.name, 'ready': self.ready.get(p.user_id, False)}
+                    for p in self.players.values()
+                ],
+            }
 
 class Server:
     def __init__(self, host, port, questions):
@@ -88,50 +100,102 @@ class Server:
             except OSError: self.drop(p)
     def error(self,p,req,code,message):
         p.send('ERROR_RESPONSE',{'code':code,'message':message},req)
+
+    def remove_from_room(self, player, room):
+        with room.lock:
+            if room.players.get(player.user_id) is not player:
+                return None
+            del room.players[player.user_id]
+            room.ready.pop(player.user_id, None)
+            room.scores.pop(player.user_id, None)
+            player.room = None
+            if room.players:
+                if room.host is player:
+                    room.host = next(iter(room.players.values()))
+                return room.snapshot()
+            room.state = 'CLOSED'
+        with self.lock:
+            self.rooms.pop(room.code, None)
+        return None
+
     def drop(self,p):
         with self.lock:
             if not p.alive: return
-            p.alive=False
-            if p.user_id in self.players and self.players[p.user_id] is p: del self.players[p.user_id]
-            room=self.rooms.get(p.room) if p.room else None
-        if room:
-            with room.lock:
-                room.players.pop(p.user_id,None); room.ready.pop(p.user_id,None)
-                if room.state=='LOBBY' and room.players:
-                    if room.host is p: room.host=next(iter(room.players.values()))
-                elif room.state in ('PLAYING','FINISHED') and not room.players:
-                    room.state='CLOSED'
-            if room.players: self.broadcast(room,'PLAYER_STATUS_EVENT',room.snapshot())
-            elif room.state=='CLOSED':
-                with self.lock: self.rooms.pop(room.code,None)
-        try: p.sock.close()
-        except OSError: pass
+            p.alive = False
+            room = self.rooms.get(p.room)
+        snapshot = self.remove_from_room(p, room) if room else None
+        with self.lock:
+            if self.players.get(p.user_id) is p:
+                del self.players[p.user_id]
+        try:
+            p.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        p.sock.close()
+        if snapshot is not None:
+            self.broadcast(room, 'PLAYER_STATUS_EVENT', snapshot)
     def handle(self,p):
         try:
-            while not self.stopping.is_set():
+            while p.alive and not self.stopping.is_set():
                 msg=recv_message(p.sock)
                 if msg is None: break
-                if msg.get('version') != 1 or not isinstance(msg.get('type'),str) or not isinstance(msg.get('payload'),dict):
+                version = msg.get('version')
+                if type(version) is not int or version != 1 or not isinstance(msg.get('type'),str) or not isinstance(msg.get('payload'),dict):
                     self.error(p,msg.get('request_id'),'INVALID_MESSAGE','Invalid message envelope'); continue
-                typ=msg['type']; data=msg['payload']; req=msg.get('request_id')
-                try: self.dispatch(p,typ,data,req)
-                except (ValueError,KeyError,TypeError) as e: self.error(p,req,'INVALID_MESSAGE',str(e))
+                typ = msg['type']
+                data = msg['payload']
+                req = msg.get('request_id')
+
+                if typ != 'LOGIN_REQUEST':
+                    if not p.session or msg.get('session_id') != p.session:
+                        self.error(
+                            p,
+                            req,
+                            'INVALID_SESSION',
+                            'Invalid or missing session ID'
+                        )
+                        continue
+
+                try:
+                    self.dispatch(p, typ, data, req)
+                except (ValueError, KeyError, TypeError) as e:
+                    self.error(p, req, 'INVALID_MESSAGE', str(e))
         except (OSError,ConnectionError,ValueError,json.JSONDecodeError): pass
         finally: self.drop(p)
     def dispatch(self,p,typ,d,req):
         if typ=='LOGIN_REQUEST':
+            if p.session is not None:
+                return self.error(p, req, 'ALREADY_LOGGED_IN', 'This connection is already logged in')
             uid=d.get('user_id'); name=d.get('name')
             if not isinstance(uid,str) or not ID_RE.fullmatch(uid): return self.error(p,req,'INVALID_USER_ID','User ID must be 1-32 letters, digits, _ or -')
             if not isinstance(name,str) or not 1 <= len(name.strip()) <= 40: return self.error(p,req,'INVALID_NAME','Display name must be 1-40 characters')
+            name = name.strip()
+            name_key = name.casefold()
             with self.lock:
-                if uid in self.players: return self.error(p,req,'DUPLICATE_USER','This user ID is already active')
-                p.user_id=uid; p.name=name.strip(); p.session=secrets.token_hex(12); self.players[uid]=p
+                if uid in self.players:
+                    error = ('DUPLICATE_USER', 'This user ID is already active')
+                elif any(player.name.casefold() == name_key for player in self.players.values()):
+                    error = ('DUPLICATE_NAME', 'This display name is already active')
+                else:
+                    error = None
+                    p.user_id = uid
+                    p.name = name
+                    p.session = secrets.token_hex(12)
+                    self.players[uid] = p
+            if error:
+                return self.error(p, req, *error)
             p.send('LOGIN_RESPONSE',{'success':True,'session_id':p.session},req); return
         if not p.session: return self.error(p,req,'INVALID_SESSION','Login first')
         if typ=='LIST_QUIZZES_REQUEST':
             p.send('LIST_QUIZZES_RESPONSE',{'quizzes':[{'quiz_id':q['quiz_id'],'title':q['title'],'description':q['description'],'question_count':len(q['questions'])} for q in self.quizzes.values()]},req)
         elif typ=='LIST_ROOMS_REQUEST':
-            with self.lock: rooms=[r.snapshot() for r in self.rooms.values() if r.state=='LOBBY']
+            with self.lock:
+                current_rooms = list(self.rooms.values())
+            rooms = []
+            for room in current_rooms:
+                snapshot = room.snapshot()
+                if snapshot['state'] == 'LOBBY':
+                    rooms.append(snapshot)
             p.send('LIST_ROOMS_RESPONSE',{'rooms':rooms},req)
         elif typ=='CREATE_ROOM_REQUEST':
             qid=d.get('quiz_id')
@@ -151,7 +215,9 @@ class Server:
                 if p.room: return self.error(p,req,'ALREADY_IN_ROOM','Leave your current room first')
                 if len(r.players)>=20: return self.error(p,req,'ROOM_FULL','Room is full')
                 r.players[p.user_id]=p; r.ready[p.user_id]=False; r.scores[p.user_id]=0; p.room=code
-            p.send('JOIN_ROOM_RESPONSE',{'success':True,'room':r.snapshot()},req); self.broadcast(r,'PLAYER_STATUS_EVENT',r.snapshot())
+                snapshot = r.snapshot()
+            p.send('JOIN_ROOM_RESPONSE', {'success': True, 'room': snapshot}, req)
+            self.broadcast(r, 'PLAYER_STATUS_EVENT', snapshot)
         elif typ=='PLAYER_LIST_REQUEST':
             r=self.get_room(p,req); 
             if r: p.send('PLAYER_LIST_RESPONSE',r.snapshot(),req)
@@ -170,9 +236,18 @@ class Server:
                     if r.state!='LOBBY': return self.error(p,req,'INVALID_ROOM_STATE','Room is not in lobby')
                     if len(r.players)<2: return self.error(p,req,'NOT_ENOUGH_PLAYERS','At least two players are required')
                     if not all(r.ready.values()): return self.error(p,req,'PLAYERS_NOT_READY','All players must be ready')
-                    r.state='PLAYING'; r.thread=threading.Thread(target=self.play,args=(r,),daemon=True)
-                p.send('START_QUIZ_RESPONSE',{'success':True},req)
-                r.thread.start()
+                    quiz_thread = threading.Thread(target=self.play, args=(r,), daemon=True)
+                    r.state = 'PLAYING'
+                    r.thread = quiz_thread
+                try:
+                    p.send('START_QUIZ_RESPONSE', {'success': True}, req)
+                except OSError:
+                    with r.lock:
+                        if r.state == 'PLAYING':
+                            r.state = 'LOBBY'
+                        r.thread = None
+                    raise
+                quiz_thread.start()
         elif typ=='ANSWER_REQUEST':
             r=self.get_room(p,req)
             if r:
@@ -191,15 +266,10 @@ class Server:
         elif typ=='LEAVE_ROOM_REQUEST':
             r=self.get_room(p,req)
             if r:
-                with r.lock:
-                    r.players.pop(p.user_id,None); r.ready.pop(p.user_id,None); r.scores.pop(p.user_id,None); p.room=None
-                    if r.host is p and r.players: r.host=next(iter(r.players.values()))
-                    if not r.players: r.state='CLOSED'
-                    snap=r.snapshot()
+                snapshot = self.remove_from_room(p, r)
                 p.send('LEAVE_ROOM_RESPONSE',{'success':True},req)
-                if r.players: self.broadcast(r,'PLAYER_STATUS_EVENT',snap)
-                else:
-                    with self.lock: self.rooms.pop(r.code,None)
+                if snapshot is not None:
+                    self.broadcast(r, 'PLAYER_STATUS_EVENT', snapshot)
         elif typ=='LOGOUT_REQUEST':
             p.send('LOGOUT_RESPONSE',{'success':True},req); self.drop(p)
         else: self.error(p,req,'UNKNOWN_COMMAND',f'Unsupported message type: {typ}')
@@ -210,7 +280,12 @@ class Server:
         return r
     @staticmethod
     def leaderboard(r):
-        return sorted([{'user_id':uid,'name':p.name,'score':r.scores.get(uid,0)} for uid,p in r.players.items()],key=lambda x:(-x['score'],x['name'].casefold(),x['user_id']))
+        with r.lock:
+            rows = [
+                {'user_id': uid, 'name': player.name, 'score': r.scores.get(uid, 0)}
+                for uid, player in r.players.items()
+            ]
+        return sorted(rows, key=lambda row: (-row['score'], row['name'].casefold(), row['user_id']))
     def play(self,r):
         try:
             self.broadcast(r,'QUIZ_STARTED_EVENT',{'quiz_id':r.quiz['quiz_id'],'title':r.quiz['title'],'total_questions':len(r.quiz['questions'])})
@@ -236,8 +311,24 @@ class Server:
                 self.broadcast(r,'QUESTION_RESULT_EVENT',result)
                 time.sleep(1)
             with r.lock:
-                r.state='FINISHED'; board=self.leaderboard(r); winner=board[0]['user_id'] if board else None
-            self.broadcast(r,'QUIZ_FINISHED_EVENT',{'quiz_id':r.quiz['quiz_id'],'final_leaderboard':board,'winner':winner})
+                r.state = 'FINISHED'
+                board = self.leaderboard(r)
+
+                if board:
+                    highest_score = board[0]['score']
+                    winners = [
+                        player['user_id']
+                        for player in board
+                        if player['score'] == highest_score
+                    ]
+                else:
+                    winners = []
+
+            self.broadcast(r, 'QUIZ_FINISHED_EVENT', {
+                'quiz_id': r.quiz['quiz_id'],
+                'final_leaderboard': board,
+                'winners': winners
+            })
         except Exception as e:
             print(f'Room {r.code} error: {e}',file=sys.stderr)
             with r.lock: r.state='FINISHED'
